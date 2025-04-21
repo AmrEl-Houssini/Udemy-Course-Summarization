@@ -10,20 +10,19 @@ from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from webdriver_manager.chrome import ChromeDriverManager
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+# Assuming this module exists and is compatible - may need to be adapted too
 from ibm_udemy_transcript_scraper import UdemyTranscriptExtractor, validate_api_key
 
 
-def create_zip_file(directory_path, files_to_include=None):
-    """Create a zip file from specific files in a directory"""
+def create_zip_file(files_data):
+    """Create a zip file from memory data instead of from disk"""
     memory_file = io.BytesIO()
     with zipfile.ZipFile(memory_file, 'w', zipfile.ZIP_DEFLATED) as zipf:
-        for root, dirs, files in os.walk(directory_path):
-            for file in files:
-                file_path = os.path.join(root, file)
-                # Only include specified files if a list is provided
-                if files_to_include is None or file_path in files_to_include:
-                    arcname = os.path.relpath(file_path, os.path.dirname(directory_path))
-                    zipf.write(file_path, arcname=arcname)
+        for file_path, file_content in files_data.items():
+            zipf.writestr(file_path, file_content)
     memory_file.seek(0)
     return memory_file
 
@@ -35,56 +34,38 @@ def get_download_link(file_content, filename, text):
     return href
 
 
-def init_browser():
-    """Initialize the browser with settings to help avoid Cloudflare detection"""
+def init_cloud_browser():
+    """Initialize a browser compatible with Streamlit Cloud"""
     options = Options()
 
-    # Basic settings
+    # Required for headless browser in cloud environment
+    options.add_argument("--headless")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-notifications")
-    options.add_argument("--window-size=1920,1080")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--disable-extensions")
 
     # Anti-detection settings
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
 
-    # Mac ARM64 specific settings
-    options.add_argument("--remote-debugging-port=9222")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--disable-extensions")
-    options.add_argument("--disable-infobars")
-    options.add_argument("--start-maximized")
-    options.add_argument("--disable-browser-side-navigation")
-    options.add_argument("--disable-features=IsolateOrigins,site-per-process")
-    options.add_argument("--disable-setuid-sandbox")
-    options.add_argument("--disable-web-security")
-
-    # User agent
+    # Realistic user agent
     options.add_argument(
         "user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
     try:
-        service = Service(ChromeDriverManager().install())
-        driver = webdriver.Chrome(service=service, options=options)
+        # Use ChromeDriverManager in a more cloud-friendly way
+        driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
     except Exception as e:
-        st.error(f"First attempt failed: {str(e)}")
+        st.error(f"Failed to initialize ChromeDriver: {str(e)}")
         try:
-            options.binary_location = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-            service = Service()
-            driver = webdriver.Chrome(service=service, options=options)
+            # Fallback approach for Streamlit Cloud
+            options.binary_location = "/usr/bin/google-chrome"  # Typical location in Linux cloud environments
+            driver = webdriver.Chrome(options=options)
         except Exception as e:
-            st.error(f"Second attempt failed: {str(e)}")
-            raise Exception("""
-            Failed to initialize ChromeDriver. Please try the following steps:
-            1. Make sure Chrome is installed and up to date
-            2. Run: pip install --upgrade webdriver-manager
-            3. Run: rm -rf ~/.wdm/drivers/chromedriver
-            4. Restart your computer
-            5. Try running the app again
-            If the issue persists, please check your Chrome version and let us know.
-            """)
+            st.error(f"Could not initialize Chrome: {str(e)}")
+            raise Exception("Failed to initialize browser in cloud environment")
 
     # Execute CDP commands to prevent detection
     driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
@@ -95,16 +76,11 @@ def init_browser():
         """
     })
 
-    # Add additional CDP commands to make the browser look more human-like
-    driver.execute_cdp_cmd("Network.setUserAgentOverride", {
-        "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    })
-
     return driver
 
 
 def modified_extract_all_transcripts(extractor, course_url, max_videos, status_queue):
-    """A modified version of extract_all_transcripts with better status updates"""
+    """A modified version of extract_all_transcripts that stores data in memory rather than files"""
     try:
         # Store the initial URL
         initial_url = extractor.driver.current_url
@@ -118,23 +94,14 @@ def modified_extract_all_transcripts(extractor, course_url, max_videos, status_q
 
         # Get course title
         course_title = extractor.get_course_title()
-        if course_title == f"udemy_course_{int(time.time())}":
+        if not course_title or course_title == f"udemy_course_{int(time.time())}":
             status_queue.put(("status", "Couldn't detect course title automatically. Using default title."))
             course_title = "udemy_course_" + str(int(time.time()))
 
         status_queue.put(("status", f"Course title: {course_title}"))
 
-        # Create output directories
-        output_dir = os.path.join("udemy_transcripts", course_title)
-        os.makedirs(output_dir, exist_ok=True)
-
-        # Always create summary directory as it's now the main feature
-        summary_dir = os.path.join(output_dir, "summaries")
-        os.makedirs(summary_dir, exist_ok=True)
-
         video_count = 0
-        transcripts = []  # Store transcripts in memory instead of saving to files
-        processed_files = []  # Keep track of processed files for this session
+        transcripts = []  # Store transcripts in memory
 
         while max_videos == 0 or video_count < max_videos:
             current_url = extractor.driver.current_url
@@ -178,7 +145,6 @@ def modified_extract_all_transcripts(extractor, course_url, max_videos, status_q
                     'lecture_info': lecture_info
                 })
 
-                # Specific success message for extraction of current lecture
                 status_queue.put(("status", f"✅ Successfully extracted: {formatted_title}"))
 
                 if extractor.api_key:
@@ -193,7 +159,6 @@ def modified_extract_all_transcripts(extractor, course_url, max_videos, status_q
                         if summary:
                             # Store summary in memory
                             transcripts[-1]['summary'] = summary
-                            # Specific success message for summarization of current lecture
                             status_queue.put(("status", f"✅ Successfully summarized: {formatted_title}"))
                         else:
                             status_queue.put(("status", f"❌ Failed to generate notes for: {formatted_title}"))
@@ -223,8 +188,7 @@ def modified_extract_all_transcripts(extractor, course_url, max_videos, status_q
         status_queue.put(("status", f"❌ Error during extraction: {str(e)}"))
         import traceback
         traceback.print_exc()
-        extractor.driver.save_screenshot("error_screenshot.png")
-        status_queue.put(("status", "Error screenshot saved as error_screenshot.png"))
+        status_queue.put(("status", f"Error details: {str(e)}"))
         return None, False, []
 
 
@@ -232,8 +196,7 @@ def extraction_thread(driver, course_url, max_videos, api_key, status_queue):
     """Run extraction in a separate thread with streamlit-compatible approach"""
     try:
         status_queue.put(("status", "Initializing extractor..."))
-        # Always enable summarization since it's the main feature now
-        extractor = UdemyTranscriptExtractor(headless=False, summarize=True, api_key=api_key)
+        extractor = UdemyTranscriptExtractor(headless=True, summarize=True, api_key=api_key)
         extractor.driver = driver  # Use the pre-initialized driver
 
         status_queue.put(("status", "Beginning extraction process..."))
@@ -243,17 +206,17 @@ def extraction_thread(driver, course_url, max_videos, api_key, status_queue):
                                                                               status_queue)
 
         if success:
-            # Save transcripts to files and get list of created files
-            output_dir, processed_files = save_transcripts(course_title, transcripts)
-            # Create zip file with only the processed files from this session
-            zip_file = create_zip_file(output_dir, processed_files)
+            # Process data in memory
+            files_data = prepare_files_data(course_title, transcripts)
+
+            # Create zip file with memory data
+            zip_file = create_zip_file(files_data)
 
             status_queue.put(("success", {
                 "course_title": course_title,
                 "transcripts": transcripts,
                 "zip_file": zip_file,
-                "output_dir": output_dir,
-                "processed_files": processed_files
+                "files_data": files_data
             }))
         else:
             status_queue.put(("error", "Extraction failed."))
@@ -270,31 +233,21 @@ def extraction_thread(driver, course_url, max_videos, api_key, status_queue):
         status_queue.put(("done", None))
 
 
-def save_transcripts(course_title, transcripts):
-    """Save transcripts and summaries to files and return list of files created"""
-    output_dir = os.path.join("udemy_transcripts", course_title)
-    os.makedirs(output_dir, exist_ok=True)
-
-    summary_dir = os.path.join(output_dir, "summaries")
-    os.makedirs(summary_dir, exist_ok=True)
-
-    processed_files = []  # Keep track of files created in this session
+def prepare_files_data(course_title, transcripts):
+    """Prepare files data in memory instead of saving to disk"""
+    files_data = {}
 
     for transcript in transcripts:
-        # Save transcript
-        transcript_file = os.path.join(output_dir, f"{transcript['title']}.txt")
-        with open(transcript_file, 'w', encoding='utf-8') as f:
-            f.write(transcript['content'])
-        processed_files.append(transcript_file)
+        # Store transcript
+        transcript_file = f"{course_title}/{transcript['title']}.txt"
+        files_data[transcript_file] = transcript['content']
 
-        # Save summary if available
+        # Store summary if available
         if 'summary' in transcript:
-            summary_file = os.path.join(summary_dir, f"{transcript['title']}_summary.md")
-            with open(summary_file, 'w', encoding='utf-8') as f:
-                f.write(transcript['summary'])
-            processed_files.append(summary_file)
+            summary_file = f"{course_title}/summaries/{transcript['title']}_summary.md"
+            files_data[summary_file] = transcript['summary']
 
-    return output_dir, processed_files
+    return files_data
 
 
 def main():
@@ -399,6 +352,13 @@ def main():
         box-shadow: 0 6px 8px rgba(0, 0, 0, 0.15);
         transform: translateY(-2px);
     }
+    .info-box {
+        background-color: #e3f2fd;
+        padding: 15px;
+        border-radius: 5px;
+        border-left: 5px solid #2196f3;
+        margin-bottom: 20px;
+    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -407,19 +367,20 @@ def main():
     This app transforms Udemy course content into high-quality, structured notes using OpenAI GPT4o-mini.
     """)
 
+    # Add a notice about Streamlit Cloud compatibility
+    st.markdown("""
+    <div class="info-box">
+    <strong>⚠️ Note:</strong> This application is optimized for Streamlit Cloud deployment. It runs in headless mode, so you'll need to provide your Udemy login credentials. The app uses secure credential handling and doesn't store any login information.
+    </div>
+    """, unsafe_allow_html=True)
+
     # Initialize session state variables
-    if 'browser_initialized' not in st.session_state:
-        st.session_state.browser_initialized = False
     if 'extraction_started' not in st.session_state:
         st.session_state.extraction_started = False
     if 'extraction_complete' not in st.session_state:
         st.session_state.extraction_complete = False
     if 'driver' not in st.session_state:
         st.session_state.driver = None
-    if 'ready_for_extraction' not in st.session_state:
-        st.session_state.ready_for_extraction = False
-    if 'cloudflare_verified' not in st.session_state:
-        st.session_state.cloudflare_verified = False
     if 'status_queue' not in st.session_state:
         st.session_state.status_queue = queue.Queue()
     if 'status_messages' not in st.session_state:
@@ -433,14 +394,13 @@ def main():
         st.markdown("""
         ### Step-by-Step Guide
         1. Enter the Udemy course URL
-        2. Choose how many videos to process (0 for all)
-        3. Provide your OpenAI API key for AI-generated notes (required)
-        4. Click "Start Process" to begin
-        5. Log in to Udemy in the browser window that opens
-        6. Navigate to the first lecture and solve any CAPTCHA/security checks
-        7. Click "Ready to Extract" when you're on the first lecture
-        8. The extraction will start automatically
-        9. Download your notes when complete!
+        2. Provide your Udemy login credentials (securely handled)
+        3. Choose how many videos to process (0 for all)
+        4. Provide your OpenAI API key for AI-generated notes (required)
+        5. Click "Start Process" to begin
+        6. The app will handle login and navigate to the course
+        7. Wait for the extraction to complete
+        8. Download your notes when complete!
         """)
 
     col1, col2 = st.columns([2, 1])
@@ -448,6 +408,10 @@ def main():
     with col1:
         with st.form("extraction_form"):
             course_url = st.text_input("Udemy Course URL", placeholder="https://www.udemy.com/course/your-course-name/")
+
+            # Add Udemy login fields
+            udemy_email = st.text_input("Udemy Email", placeholder="your-email@example.com")
+            udemy_password = st.text_input("Udemy Password", type="password")
 
             col_videos, col_api = st.columns(2)
             with col_videos:
@@ -459,12 +423,8 @@ def main():
 
     with col2:
         st.markdown("### Status")
-        if not st.session_state.browser_initialized:
+        if not st.session_state.extraction_started:
             st.info("Enter course details and click 'Start Process'")
-        elif not st.session_state.cloudflare_verified:
-            st.warning("Please complete the Cloudflare verification in the browser")
-        elif not st.session_state.ready_for_extraction:
-            st.info("Navigate to the first lecture, then click 'Ready to Extract'")
         elif st.session_state.extraction_started and not st.session_state.extraction_complete:
             st.info("Extraction in progress...")
         elif st.session_state.extraction_complete:
@@ -472,43 +432,16 @@ def main():
             st.markdown('<div class="signature">From Houssini With Love</div>', unsafe_allow_html=True)
 
     # Process start button
-    if start_process and course_url:
+    if start_process and course_url and udemy_email and udemy_password:
         if not api_key:
             st.error("OpenAI API Key is required for generating notes.")
-        elif not st.session_state.browser_initialized:
-            with st.spinner("Initializing browser..."):
-                try:
-                    st.session_state.driver = init_browser()
-                    st.session_state.driver.get(course_url)
-                    st.session_state.browser_initialized = True
-                    st.session_state.status_messages = [
-                        "Browser initialized. Please log in to Udemy and navigate to the first lecture."]
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Failed to initialize browser: {str(e)}")
-
-    # Check Cloudflare verification
-    if st.session_state.browser_initialized and not st.session_state.cloudflare_verified:
-        try:
-            if "challenge" not in st.session_state.driver.current_url and "cloudflare" not in st.session_state.driver.current_url:
-                st.session_state.cloudflare_verified = True
-                st.session_state.status_messages.append(
-                    "✅ Cloudflare verification completed. Please navigate to the first lecture.")
-                st.rerun()
-        except Exception as e:
-            st.error(f"Error checking Cloudflare status: {str(e)}")
-
-    # Ready to extract button
-    if st.session_state.cloudflare_verified and not st.session_state.ready_for_extraction:
-        ready_button = st.button("✅ Ready to Extract", use_container_width=True, type="primary")
-        if ready_button:
-            st.session_state.ready_for_extraction = True
-            st.session_state.status_messages.append("Ready to begin extraction and notes generation.")
-            st.session_state.extraction_started = True  # Auto-start extraction
+        else:
+            st.session_state.extraction_started = True
+            st.session_state.status_messages = ["Starting extraction process..."]
             st.rerun()
 
     # Start extraction process
-    if st.session_state.ready_for_extraction and st.session_state.extraction_started and not st.session_state.extraction_complete:
+    if st.session_state.extraction_started and not st.session_state.extraction_complete:
         # Display status messages
         st.markdown("### Progress")
 
@@ -537,6 +470,69 @@ def main():
 
         # Start extraction thread if not already started
         if not hasattr(st.session_state, 'thread') or st.session_state.thread is None:
+            # Initialize browser
+            if not st.session_state.driver:
+                try:
+                    st.session_state.status_messages.append("Initializing browser...")
+                    st.session_state.driver = init_cloud_browser()
+                    st.session_state.status_messages.append("Browser initialized successfully.")
+
+                    # Navigate to course URL
+                    st.session_state.driver.get(course_url)
+                    time.sleep(3)
+
+                    # Handle login
+                    st.session_state.status_messages.append("Logging in to Udemy...")
+                    try:
+                        # Look for login button or element
+                        login_btn = WebDriverWait(st.session_state.driver, 10).until(
+                            EC.element_to_be_clickable(
+                                (By.XPATH, "//a[contains(@class, 'login') or contains(@data-purpose, 'header-login')]"))
+                        )
+                        login_btn.click()
+                        time.sleep(2)
+
+                        # Input email and password
+                        email_field = WebDriverWait(st.session_state.driver, 10).until(
+                            EC.presence_of_element_located((By.NAME, "email"))
+                        )
+                        email_field.send_keys(udemy_email)
+
+                        password_field = st.session_state.driver.find_element(By.NAME, "password")
+                        password_field.send_keys(udemy_password)
+
+                        # Click login button
+                        submit_btn = st.session_state.driver.find_element(By.XPATH, "//button[@type='submit']")
+                        submit_btn.click()
+                        time.sleep(5)
+
+                        # Navigate to course URL again to ensure we're on the right page
+                        st.session_state.driver.get(course_url)
+                        time.sleep(5)
+
+                        # Try to navigate to the first lecture
+                        try:
+                            start_course_btn = WebDriverWait(st.session_state.driver, 10).until(
+                                EC.element_to_be_clickable((By.XPATH,
+                                                            "//button[contains(text(), 'Start') or contains(@data-purpose, 'start-course')]"))
+                            )
+                            start_course_btn.click()
+                            st.session_state.status_messages.append("Successfully navigated to the first lecture.")
+                        except Exception as e:
+                            st.session_state.status_messages.append(
+                                f"Note: Could not find start button. This might be normal if you're already in the course. Continuing...")
+
+                    except Exception as e:
+                        st.session_state.status_messages.append(f"Login process experienced an issue: {str(e)}")
+                        st.session_state.status_messages.append(
+                            "Continuing with extraction - please check if login was successful.")
+
+                except Exception as e:
+                    st.session_state.status_messages.append(f"Browser initialization failed: {str(e)}")
+                    st.session_state.extraction_complete = True
+                    st.rerun()
+
+            # Start the extraction thread
             st.session_state.thread = threading.Thread(
                 target=extraction_thread,
                 args=(st.session_state.driver, course_url, max_videos, api_key, st.session_state.status_queue)
