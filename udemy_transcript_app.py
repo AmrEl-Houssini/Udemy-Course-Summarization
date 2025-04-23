@@ -598,25 +598,32 @@ def extraction_thread(driver, course_url, max_videos, api_key, status_queue, ibm
         login_success = handle_ibm_login(driver, course_url, ibm_email, ibm_password, status_queue)
         
         if not login_success:
-            status_queue.put(("status", "IBM login process was not successful. Attempting to continue anyway..."))
+            status_queue.put(("error", "IBM login process failed. Please check your credentials and try again."))
+            return
+        
+        status_queue.put(("status", "Login successful. Navigating to first lecture..."))
         
         # Navigate to first lecture
         navigation_success = navigate_to_first_lecture(driver, status_queue)
         
         if not navigation_success:
-            status_queue.put(("status", "Navigation to first lecture failed. Attempting to continue extraction anyway..."))
+            status_queue.put(("error", "Failed to navigate to first lecture. Please check the course URL and try again."))
+            return
         
-        status_queue.put(("status", "Initializing extractor..."))
+        status_queue.put(("status", "Successfully navigated to first lecture. Initializing extractor..."))
+        
+        # Initialize extractor with the existing driver
         extractor = UdemyTranscriptExtractor(headless=True, summarize=True, api_key=api_key)
         extractor.driver = driver  # Use the pre-initialized driver
 
-        status_queue.put(("status", "Beginning extraction process..."))
+        status_queue.put(("status", "Extractor initialized. Beginning extraction process..."))
 
         # Call modified extraction function
-        course_title, success, transcripts = modified_extract_all_transcripts(extractor, course_url, max_videos,
-                                                                              status_queue)
+        course_title, success, transcripts = modified_extract_all_transcripts(extractor, course_url, max_videos, status_queue)
 
-        if success:
+        if success and transcripts:
+            status_queue.put(("status", f"Successfully extracted {len(transcripts)} transcripts."))
+            
             # Process data in memory
             files_data = prepare_files_data(course_title, transcripts)
 
@@ -630,16 +637,19 @@ def extraction_thread(driver, course_url, max_videos, api_key, status_queue, ibm
                 "files_data": files_data
             }))
         else:
-            status_queue.put(("error", "Extraction failed."))
+            status_queue.put(("error", "Extraction failed. No transcripts were extracted."))
     except Exception as e:
-        status_queue.put(("error", f"Error: {str(e)}"))
+        import traceback
+        error_details = traceback.format_exc()
+        status_queue.put(("error", f"Error during extraction: {str(e)}\n\nError details:\n{error_details}"))
     finally:
         # Close the browser
         try:
-            driver.quit()
-            status_queue.put(("status", "Browser closed."))
-        except:
-            pass
+            if driver:
+                driver.quit()
+                status_queue.put(("status", "Browser closed."))
+        except Exception as e:
+            status_queue.put(("status", f"Error closing browser: {str(e)}"))
         # Signal that the thread is done
         status_queue.put(("done", None))
 
@@ -684,6 +694,8 @@ def main():
         st.session_state.download_data = None
     if 'progress' not in st.session_state:
         st.session_state.progress = {"current": 0, "max": 0, "title": ""}
+    if 'error_message' not in st.session_state:
+        st.session_state.error_message = None
 
     # Add advanced settings in sidebar
     with st.sidebar:
@@ -708,6 +720,13 @@ def main():
         overflow-y: auto;
         margin-bottom: 1rem;
         border: 1px solid #dee2e6;
+    }
+    .error-box {
+        padding: 1rem;
+        border-radius: 0.5rem;
+        background-color: #fff3f3;
+        border: 1px solid #ffcdd2;
+        margin-bottom: 1rem;
     }
     .download-button {
         background-color: #4CAF50;
@@ -847,8 +866,11 @@ def main():
         elif st.session_state.extraction_started and not st.session_state.extraction_complete:
             st.info("Extraction in progress...")
         elif st.session_state.extraction_complete:
-            st.success("Extraction completed! Download your notes.")
-            st.markdown('<div class="signature">From Houssini With Love</div>', unsafe_allow_html=True)
+            if st.session_state.error_message:
+                st.error(st.session_state.error_message)
+            else:
+                st.success("Extraction completed! Download your notes.")
+                st.markdown('<div class="signature">From Houssini With Love</div>', unsafe_allow_html=True)
 
     # Process start button
     if start_process and course_url and ibm_email and ibm_password:
@@ -856,6 +878,8 @@ def main():
             st.error("OpenAI API Key is required for generating notes.")
         else:
             st.session_state.extraction_started = True
+            st.session_state.extraction_complete = False
+            st.session_state.error_message = None
             st.session_state.status_messages = ["Starting extraction process..."]
             st.rerun()
 
@@ -900,6 +924,7 @@ def main():
                     st.session_state.status_messages.append("Browser initialized successfully.")
                 except Exception as e:
                     st.session_state.status_messages.append(f"Browser initialization failed: {str(e)}")
+                    st.session_state.error_message = f"Failed to initialize browser: {str(e)}"
                     st.session_state.extraction_complete = True
                     st.rerun()
 
@@ -932,8 +957,9 @@ def main():
                     st.session_state.status_messages.append("✅ Notes generation completed successfully!")
                 
                 elif msg_type == "error":
+                    st.session_state.error_message = content
+                    st.session_state.extraction_complete = True
                     st.session_state.status_messages.append(f"❌ Error: {content}")
-                    st.session_state.extraction_complete = True  # End the process
                 
                 elif msg_type == "done":
                     # Thread is done
@@ -950,7 +976,7 @@ def main():
             st.rerun()
     
     # Show download section when extraction is complete
-    if st.session_state.extraction_complete and st.session_state.download_data:
+    if st.session_state.extraction_complete and st.session_state.download_data and not st.session_state.error_message:
         st.markdown("---")
         st.markdown('<div class="download-notes-section">📥 Download Your Notes</div>', unsafe_allow_html=True)
         
