@@ -39,11 +39,12 @@ def init_cloud_browser():
     options = Options()
 
     # Required for headless browser in cloud environment
-    options.add_argument("--headless")
+    options.add_argument("--headless=new")  # Using newer headless mode
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
     options.add_argument("--disable-extensions")
+    options.add_argument("--window-size=1920,1080")  # Larger window size for better visibility
 
     # Anti-detection settings
     options.add_argument("--disable-blink-features=AutomationControlled")
@@ -77,6 +78,284 @@ def init_cloud_browser():
     })
 
     return driver
+
+
+def init_visible_browser():
+    """Initialize a visible browser for debugging and manual interaction"""
+    options = Options()
+    
+    # Basic settings for visible browser
+    options.add_argument("--window-size=1920,1080")
+    options.add_argument("--disable-extensions")
+    
+    # Anti-detection settings
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option("useAutomationExtension", False)
+    
+    # Realistic user agent
+    options.add_argument(
+        "user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+    
+    try:
+        driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+    except Exception as e:
+        st.error(f"Failed to initialize visible Chrome: {str(e)}")
+        raise Exception("Failed to initialize visible browser")
+    
+    return driver
+
+
+def handle_login(driver, course_url, udemy_email, udemy_password, status_queue):
+    """Handle the Udemy login process specifically selecting the second login option"""
+    try:
+        # Navigate to course URL first
+        driver.get(course_url)
+        status_queue.put(("status", "Navigated to course page. Looking for login elements..."))
+        time.sleep(3)
+        
+        # Look for login button or element
+        try:
+            login_btn = WebDriverWait(driver, 10).until(
+                EC.element_to_be_clickable(
+                    (By.XPATH, "//a[contains(@class, 'login') or contains(@data-purpose, 'header-login')]"))
+            )
+            login_btn.click()
+            status_queue.put(("status", "Clicked on login button."))
+            time.sleep(2)
+        except Exception as e:
+            status_queue.put(("status", f"Login button not found, might already be on login page: {str(e)}"))
+            
+        # Find and click on the second login option
+        try:
+            # Wait for login options to be visible
+            WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.XPATH, "//div[contains(@class, 'auth-method')]"))
+            )
+            
+            # Get all login options
+            login_options = driver.find_elements(By.XPATH, "//div[contains(@class, 'auth-method')] | //form[contains(@class, 'login-form')] | //button[contains(@class, 'auth-button')]")
+            
+            if len(login_options) > 1:
+                # Click the second option
+                login_options[1].click()
+                status_queue.put(("status", "Selected second login option."))
+            else:
+                # If we can't find auth method containers, try finding individual login buttons
+                login_buttons = driver.find_elements(By.XPATH, "//button[contains(@class, 'auth') or contains(text(), 'Log') or contains(text(), 'Sign')]")
+                if len(login_buttons) > 1:
+                    login_buttons[1].click()
+                    status_queue.put(("status", "Selected second login button."))
+                else:
+                    status_queue.put(("status", "Could not find multiple login options. Proceeding with available login form."))
+            
+            time.sleep(2)
+        except Exception as e:
+            status_queue.put(("status", f"Error selecting second login option: {str(e)}. Proceeding with available login form."))
+        
+        # Find and fill the email/username field
+        try:
+            # Try several possible field selectors
+            selectors = [
+                (By.NAME, "email"),
+                (By.ID, "email"),
+                (By.NAME, "username"),
+                (By.ID, "username"),
+                (By.ID, "user"),
+                (By.XPATH, "//input[@type='email']"),
+                (By.XPATH, "//input[@placeholder='Email' or @placeholder='Username' or @placeholder='Email or username']"),
+                (By.XPATH, "//input[contains(@class, 'email') or contains(@class, 'username')]")
+            ]
+            
+            email_field = None
+            for selector_type, selector_value in selectors:
+                try:
+                    email_field = WebDriverWait(driver, 3).until(
+                        EC.presence_of_element_located((selector_type, selector_value))
+                    )
+                    if email_field:
+                        break
+                except:
+                    continue
+            
+            if email_field:
+                email_field.clear()
+                email_field.send_keys(udemy_email)
+                status_queue.put(("status", "Entered email/username."))
+            else:
+                status_queue.put(("status", "Could not find email/username field."))
+                return False
+        except Exception as e:
+            status_queue.put(("status", f"Error entering email/username: {str(e)}"))
+            return False
+        
+        # Find and fill the password field
+        try:
+            # Try several possible field selectors for password
+            password_selectors = [
+                (By.NAME, "password"),
+                (By.ID, "password"),
+                (By.XPATH, "//input[@type='password']"),
+                (By.XPATH, "//input[@placeholder='Password']"),
+                (By.XPATH, "//input[contains(@class, 'password')]")
+            ]
+            
+            password_field = None
+            for selector_type, selector_value in password_selectors:
+                try:
+                    password_field = WebDriverWait(driver, 3).until(
+                        EC.presence_of_element_located((selector_type, selector_value))
+                    )
+                    if password_field:
+                        break
+                except:
+                    continue
+            
+            if password_field:
+                password_field.clear()
+                password_field.send_keys(udemy_password)
+                status_queue.put(("status", "Entered password."))
+            else:
+                status_queue.put(("status", "Could not find password field."))
+                return False
+        except Exception as e:
+            status_queue.put(("status", f"Error entering password: {str(e)}"))
+            return False
+        
+        # Find and click the submit button
+        try:
+            # Try several possible button selectors
+            button_selectors = [
+                (By.XPATH, "//button[@type='submit']"),
+                (By.XPATH, "//button[contains(text(), 'Log in') or contains(text(), 'Sign in') or contains(text(), 'Login')]"),
+                (By.XPATH, "//input[@type='submit']"),
+                (By.XPATH, "//button[contains(@class, 'login') or contains(@class, 'submit')]")
+            ]
+            
+            submit_button = None
+            for selector_type, selector_value in button_selectors:
+                try:
+                    submit_button = WebDriverWait(driver, 3).until(
+                        EC.element_to_be_clickable((selector_type, selector_value))
+                    )
+                    if submit_button:
+                        break
+                except:
+                    continue
+            
+            if submit_button:
+                submit_button.click()
+                status_queue.put(("status", "Clicked submit button. Waiting for login to complete..."))
+                time.sleep(8)  # Give enough time for login to complete
+            else:
+                status_queue.put(("status", "Could not find submit button."))
+                return False
+        except Exception as e:
+            status_queue.put(("status", f"Error clicking submit button: {str(e)}"))
+            return False
+        
+        # Check if login was successful by looking for user profile elements or course content
+        try:
+            # Wait for either course content or profile elements to be present
+            WebDriverWait(driver, 10).until(
+                EC.any_of(
+                    EC.presence_of_element_located((By.XPATH, "//div[contains(@class, 'course-content')]")),
+                    EC.presence_of_element_located((By.XPATH, "//a[contains(@class, 'user-profile')]")),
+                    EC.presence_of_element_located((By.XPATH, "//div[contains(@class, 'sidebar')]"))
+                )
+            )
+            status_queue.put(("status", "Login successful! Detected course elements."))
+            
+            # Navigate back to course URL to ensure we're on the right page
+            driver.get(course_url)
+            status_queue.put(("status", "Navigated back to course page after login."))
+            time.sleep(5)
+            
+            return True
+        except Exception as e:
+            status_queue.put(("status", f"Could not verify successful login: {str(e)}"))
+            return False
+            
+    except Exception as e:
+        status_queue.put(("status", f"Login process failed: {str(e)}"))
+        return False
+
+
+def navigate_to_first_lecture(driver, status_queue):
+    """Navigate to the first lecture of the course"""
+    try:
+        # Try to find and click "Start Course" or "Continue" button
+        button_selectors = [
+            (By.XPATH, "//button[contains(text(), 'Start') or contains(@data-purpose, 'start-course')]"),
+            (By.XPATH, "//a[contains(text(), 'Start') or contains(@data-purpose, 'start-course')]"),
+            (By.XPATH, "//button[contains(text(), 'Continue') or contains(@data-purpose, 'continue-course')]"),
+            (By.XPATH, "//a[contains(text(), 'Continue') or contains(@data-purpose, 'continue-course')]"),
+            (By.XPATH, "//button[contains(@class, 'start') or contains(@class, 'course-cta')]"),
+            (By.XPATH, "//a[contains(@class, 'start') or contains(@class, 'course-cta')]")
+        ]
+        
+        start_button = None
+        for selector_type, selector_value in button_selectors:
+            try:
+                start_button = WebDriverWait(driver, 3).until(
+                    EC.element_to_be_clickable((selector_type, selector_value))
+                )
+                if start_button:
+                    break
+            except:
+                continue
+        
+        if start_button:
+            start_button.click()
+            status_queue.put(("status", "Clicked on start/continue course button."))
+            time.sleep(5)
+            return True
+        
+        # If no button found, try to find and click on the first lecture directly
+        lecture_selectors = [
+            (By.XPATH, "//a[contains(@class, 'lecture') and contains(@class, 'item')]"),
+            (By.XPATH, "//div[contains(@class, 'lecture-item')]//a"),
+            (By.XPATH, "//div[contains(@class, 'curriculum-item')]//a"),
+            (By.XPATH, "//li[contains(@class, 'curriculum-item')]//a")
+        ]
+        
+        first_lecture = None
+        for selector_type, selector_value in lecture_selectors:
+            try:
+                lectures = driver.find_elements(selector_type, selector_value)
+                if lectures and len(lectures) > 0:
+                    first_lecture = lectures[0]
+                    break
+            except:
+                continue
+        
+        if first_lecture:
+            first_lecture.click()
+            status_queue.put(("status", "Clicked on first lecture directly."))
+            time.sleep(5)
+            return True
+        
+        status_queue.put(("status", "Could not find navigation elements to first lecture. May already be in lecture view."))
+        
+        # Check if we're already in a lecture view
+        try:
+            # Look for typical lecture page elements
+            WebDriverWait(driver, 5).until(
+                EC.any_of(
+                    EC.presence_of_element_located((By.XPATH, "//div[contains(@class, 'video-player')]")),
+                    EC.presence_of_element_located((By.XPATH, "//div[contains(@class, 'lecture-view')]")),
+                    EC.presence_of_element_located((By.XPATH, "//div[contains(@class, 'curriculum-navigation')]"))
+                )
+            )
+            status_queue.put(("status", "Already in lecture view."))
+            return True
+        except:
+            status_queue.put(("status", "Not in lecture view and couldn't navigate to first lecture."))
+            return False
+            
+    except Exception as e:
+        status_queue.put(("status", f"Error navigating to first lecture: {str(e)}"))
+        return False
 
 
 def modified_extract_all_transcripts(extractor, course_url, max_videos, status_queue):
@@ -192,16 +471,148 @@ def modified_extract_all_transcripts(extractor, course_url, max_videos, status_q
         return None, False, []
 
 
-def extraction_thread(driver, course_url, max_videos, api_key, status_queue):
-    """Run extraction in a separate thread with streamlit-compatible approach"""
+def handle_ibm_login(driver, course_url, ibm_email, ibm_password, status_queue):
+    """Handle the IBM w3id login process for Udemy for Business"""
     try:
+        # Navigate to course URL first
+        driver.get(course_url)
+        status_queue.put(("status", "Navigated to course page. Looking for login elements..."))
+        time.sleep(3)
+        
+        # Look for login button or element
+        try:
+            login_btn = WebDriverWait(driver, 10).until(
+                EC.element_to_be_clickable(
+                    (By.XPATH, "//a[contains(@class, 'login') or contains(@data-purpose, 'header-login')]"))
+            )
+            login_btn.click()
+            status_queue.put(("status", "Clicked on login button."))
+            time.sleep(2)
+        except Exception as e:
+            status_queue.put(("status", f"Login button not found, might already be on login page: {str(e)}"))
+        
+        # Handle the IBM Security Verify screen - select "w3id Credentials" option
+        try:
+            # Wait for the w3id Credentials button to be visible
+            WebDriverWait(driver, 15).until(
+                EC.presence_of_element_located((By.ID, "credsDiv"))
+            )
+            
+            status_queue.put(("status", "Found IBM Security Verify screen with w3id Credentials option"))
+            
+            # Try multiple approaches to click the w3id Credentials button
+            try:
+                # First approach: click the div directly
+                w3id_button = driver.find_element(By.ID, "credsDiv")
+                w3id_button.click()
+                status_queue.put(("status", "Clicked w3id Credentials button directly"))
+            except Exception as e:
+                status_queue.put(("status", f"Could not click button directly: {str(e)}. Trying alternative approach..."))
+                
+                try:
+                    # Second approach: click the label
+                    label = driver.find_element(By.XPATH, "//label[@for='credsDiv']")
+                    label.click()
+                    status_queue.put(("status", "Clicked w3id Credentials label"))
+                except Exception as e2:
+                    status_queue.put(("status", f"Could not click label: {str(e2)}. Trying JavaScript click..."))
+                    
+                    try:
+                        # Third approach: use JavaScript to click
+                        element = driver.find_element(By.ID, "credsDiv")
+                        driver.execute_script("arguments[0].click();", element)
+                        status_queue.put(("status", "Used JavaScript to click w3id Credentials button"))
+                    except Exception as e3:
+                        status_queue.put(("status", f"All attempts to click w3id option failed: {str(e3)}"))
+                        return False
+            
+            # Wait for transition to the username/password screen
+            time.sleep(5)
+            
+        except Exception as e:
+            status_queue.put(("status", f"Error on IBM Security Verify screen: {str(e)}. Attempting to continue..."))
+        
+        # Now handle the username/password form
+        try:
+            # Wait for the email field to appear
+            email_field = WebDriverWait(driver, 15).until(
+                EC.presence_of_element_located((By.ID, "user-name-input"))
+            )
+            email_field.clear()
+            email_field.send_keys(ibm_email)
+            status_queue.put(("status", "Entered IBM email"))
+            
+            # Find and fill the password field
+            password_field = WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.ID, "password-input"))
+            )
+            password_field.clear()
+            password_field.send_keys(ibm_password)
+            status_queue.put(("status", "Entered IBM password"))
+            
+            # Click the sign in button
+            submit_button = WebDriverWait(driver, 10).until(
+                EC.element_to_be_clickable((By.ID, "login-button"))
+            )
+            submit_button.click()
+            status_queue.put(("status", "Clicked IBM sign in button. Waiting for login to complete..."))
+            time.sleep(10)  # Give enough time for login and potential redirects
+            
+        except Exception as e:
+            status_queue.put(("status", f"Error with username/password form: {str(e)}"))
+            return False
+        
+        # Check if login was successful
+        try:
+            # Wait for typical course elements after successful login
+            WebDriverWait(driver, 15).until(
+                EC.any_of(
+                    EC.presence_of_element_located((By.XPATH, "//div[contains(@class, 'course-content')]")),
+                    EC.presence_of_element_located((By.XPATH, "//a[contains(@class, 'user-profile')]")),
+                    EC.presence_of_element_located((By.XPATH, "//div[contains(@class, 'sidebar')]"))
+                )
+            )
+            status_queue.put(("status", "IBM login successful! Detected course elements."))
+            
+            # Navigate back to course URL to ensure we're on the right page
+            driver.get(course_url)
+            status_queue.put(("status", "Navigated back to course page after login."))
+            time.sleep(5)
+            
+            return True
+        except Exception as e:
+            status_queue.put(("status", f"Could not verify successful IBM login: {str(e)}"))
+            return False
+            
+    except Exception as e:
+        status_queue.put(("status", f"IBM login process failed: {str(e)}"))
+        return False
+
+
+def extraction_thread(driver, course_url, max_videos, api_key, status_queue, ibm_email, ibm_password):
+    """Run extraction in a separate thread with IBM login handling"""
+    try:
+        status_queue.put(("status", "Starting IBM w3id login process..."))
+        
+        # Handle IBM login
+        login_success = handle_ibm_login(driver, course_url, ibm_email, ibm_password, status_queue)
+        
+        if not login_success:
+            status_queue.put(("status", "IBM login process was not successful. Attempting to continue anyway..."))
+        
+        # Navigate to first lecture
+        navigation_success = navigate_to_first_lecture(driver, status_queue)
+        
+        if not navigation_success:
+            status_queue.put(("status", "Navigation to first lecture failed. Attempting to continue extraction anyway..."))
+        
         status_queue.put(("status", "Initializing extractor..."))
         extractor = UdemyTranscriptExtractor(headless=True, summarize=True, api_key=api_key)
         extractor.driver = driver  # Use the pre-initialized driver
 
         status_queue.put(("status", "Beginning extraction process..."))
 
-        # Call our modified extraction function
+        # Call modified extraction function
         course_title, success, transcripts = modified_extract_all_transcripts(extractor, course_url, max_videos,
                                                                               status_queue)
 
@@ -257,6 +668,30 @@ def main():
         layout="wide",
         initial_sidebar_state="expanded"
     )
+
+    # Initialize session state variables
+    if 'extraction_started' not in st.session_state:
+        st.session_state.extraction_started = False
+    if 'extraction_complete' not in st.session_state:
+        st.session_state.extraction_complete = False
+    if 'driver' not in st.session_state:
+        st.session_state.driver = None
+    if 'status_queue' not in st.session_state:
+        st.session_state.status_queue = queue.Queue()
+    if 'status_messages' not in st.session_state:
+        st.session_state.status_messages = []
+    if 'download_data' not in st.session_state:
+        st.session_state.download_data = None
+    if 'progress' not in st.session_state:
+        st.session_state.progress = {"current": 0, "max": 0, "title": ""}
+
+    # Add advanced settings in sidebar
+    with st.sidebar:
+        st.title("Advanced Settings")
+        headless_mode = st.checkbox("Run in headless mode", value=True, 
+                                    help="Uncheck to see the browser window (useful for debugging login issues)")
+        manual_verification = st.checkbox("Enable manual verification", value=False,
+                                        help="Allow manual interaction with the browser during login")
 
     # Add custom CSS to make the app look more professional
     st.markdown("""
@@ -370,31 +805,15 @@ def main():
     # Add a notice about Streamlit Cloud compatibility
     st.markdown("""
     <div class="info-box">
-    <strong>⚠️ Note:</strong> This application is optimized for Streamlit Cloud deployment. It runs in headless mode, so you'll need to provide your Udemy login credentials. The app uses secure credential handling and doesn't store any login information.
+    <strong>⚠️ Note:</strong> This application is optimized for Streamlit Cloud deployment. It runs in headless mode, so you'll need to provide your IBM w3id credentials. The app uses secure credential handling and doesn't store any login information.
     </div>
     """, unsafe_allow_html=True)
-
-    # Initialize session state variables
-    if 'extraction_started' not in st.session_state:
-        st.session_state.extraction_started = False
-    if 'extraction_complete' not in st.session_state:
-        st.session_state.extraction_complete = False
-    if 'driver' not in st.session_state:
-        st.session_state.driver = None
-    if 'status_queue' not in st.session_state:
-        st.session_state.status_queue = queue.Queue()
-    if 'status_messages' not in st.session_state:
-        st.session_state.status_messages = []
-    if 'download_data' not in st.session_state:
-        st.session_state.download_data = None
-    if 'progress' not in st.session_state:
-        st.session_state.progress = {"current": 0, "max": 0, "title": ""}
 
     with st.expander("ℹ️ How to use", expanded=True):
         st.markdown("""
         ### Step-by-Step Guide
         1. Enter the Udemy course URL
-        2. Provide your Udemy login credentials (securely handled)
+        2. Provide your IBM w3id credentials (securely handled)
         3. Choose how many videos to process (0 for all)
         4. Provide your OpenAI API key for AI-generated notes (required)
         5. Click "Start Process" to begin
@@ -404,21 +823,21 @@ def main():
         """)
 
     col1, col2 = st.columns([2, 1])
-
+    
     with col1:
         with st.form("extraction_form"):
             course_url = st.text_input("Udemy Course URL", placeholder="https://www.udemy.com/course/your-course-name/")
-
-            # Add Udemy login fields
-            udemy_email = st.text_input("Udemy Email", placeholder="your-email@example.com")
-            udemy_password = st.text_input("Udemy Password", type="password")
-
+            
+            # Update to IBM login fields
+            ibm_email = st.text_input("IBM Email", placeholder="your-email@ibm.com")
+            ibm_password = st.text_input("IBM Password", type="password")
+            
             col_videos, col_api = st.columns(2)
             with col_videos:
                 max_videos = st.number_input("Number of videos (0 for all)", min_value=0, value=0)
             with col_api:
                 api_key = st.text_input("OpenAI API Key (required)", type="password")
-
+                
             start_process = st.form_submit_button("🚀 Start Process", use_container_width=True)
 
     with col2:
@@ -432,7 +851,7 @@ def main():
             st.markdown('<div class="signature">From Houssini With Love</div>', unsafe_allow_html=True)
 
     # Process start button
-    if start_process and course_url and udemy_email and udemy_password:
+    if start_process and course_url and ibm_email and ibm_password:
         if not api_key:
             st.error("OpenAI API Key is required for generating notes.")
         else:
@@ -444,7 +863,7 @@ def main():
     if st.session_state.extraction_started and not st.session_state.extraction_complete:
         # Display status messages
         st.markdown("### Progress")
-
+        
         # Create a progress bar
         if st.session_state.progress["max"] and st.session_state.progress["max"] != "unknown":
             progress_pct = min(100, int(st.session_state.progress["current"] / st.session_state.progress["max"] * 100))
@@ -458,148 +877,100 @@ def main():
             st.markdown(progress_html, unsafe_allow_html=True)
         elif st.session_state.progress["current"] > 0:
             st.write(f"Processed {st.session_state.progress['current']} videos")
-
+            
         if st.session_state.progress["title"]:
             st.caption(f"Current: {st.session_state.progress['title']}")
-
+        
         # Display status messages in a scrollable box
         st.markdown('<div class="status-box">', unsafe_allow_html=True)
         for msg in st.session_state.status_messages:
             st.write(msg)
         st.markdown('</div>', unsafe_allow_html=True)
-
+        
         # Start extraction thread if not already started
         if not hasattr(st.session_state, 'thread') or st.session_state.thread is None:
             # Initialize browser
             if not st.session_state.driver:
                 try:
                     st.session_state.status_messages.append("Initializing browser...")
-                    st.session_state.driver = init_cloud_browser()
+                    if headless_mode:
+                        st.session_state.driver = init_cloud_browser()
+                    else:
+                        st.session_state.driver = init_visible_browser()
                     st.session_state.status_messages.append("Browser initialized successfully.")
-
-                    # Navigate to course URL
-                    st.session_state.driver.get(course_url)
-                    time.sleep(3)
-
-                    # Handle login
-                    st.session_state.status_messages.append("Logging in to Udemy...")
-                    try:
-                        # Look for login button or element
-                        login_btn = WebDriverWait(st.session_state.driver, 10).until(
-                            EC.element_to_be_clickable(
-                                (By.XPATH, "//a[contains(@class, 'login') or contains(@data-purpose, 'header-login')]"))
-                        )
-                        login_btn.click()
-                        time.sleep(2)
-
-                        # Input email and password
-                        email_field = WebDriverWait(st.session_state.driver, 10).until(
-                            EC.presence_of_element_located((By.NAME, "email"))
-                        )
-                        email_field.send_keys(udemy_email)
-
-                        password_field = st.session_state.driver.find_element(By.NAME, "password")
-                        password_field.send_keys(udemy_password)
-
-                        # Click login button
-                        submit_btn = st.session_state.driver.find_element(By.XPATH, "//button[@type='submit']")
-                        submit_btn.click()
-                        time.sleep(5)
-
-                        # Navigate to course URL again to ensure we're on the right page
-                        st.session_state.driver.get(course_url)
-                        time.sleep(5)
-
-                        # Try to navigate to the first lecture
-                        try:
-                            start_course_btn = WebDriverWait(st.session_state.driver, 10).until(
-                                EC.element_to_be_clickable((By.XPATH,
-                                                            "//button[contains(text(), 'Start') or contains(@data-purpose, 'start-course')]"))
-                            )
-                            start_course_btn.click()
-                            st.session_state.status_messages.append("Successfully navigated to the first lecture.")
-                        except Exception as e:
-                            st.session_state.status_messages.append(
-                                f"Note: Could not find start button. This might be normal if you're already in the course. Continuing...")
-
-                    except Exception as e:
-                        st.session_state.status_messages.append(f"Login process experienced an issue: {str(e)}")
-                        st.session_state.status_messages.append(
-                            "Continuing with extraction - please check if login was successful.")
-
                 except Exception as e:
                     st.session_state.status_messages.append(f"Browser initialization failed: {str(e)}")
                     st.session_state.extraction_complete = True
                     st.rerun()
 
-            # Start the extraction thread
+            # Start the extraction thread with IBM credentials
             st.session_state.thread = threading.Thread(
                 target=extraction_thread,
-                args=(st.session_state.driver, course_url, max_videos, api_key, st.session_state.status_queue)
+                args=(st.session_state.driver, course_url, max_videos, api_key, st.session_state.status_queue, ibm_email, ibm_password)
             )
             st.session_state.thread.daemon = True
             st.session_state.thread.start()
-
+        
         # Check for and process messages from the thread
         messages_processed = False
         while not st.session_state.status_queue.empty():
             message = st.session_state.status_queue.get_nowait()
             messages_processed = True
-
+            
             if isinstance(message, tuple):
                 msg_type, content = message
-
+                
                 if msg_type == "status":
                     st.session_state.status_messages.append(content)
-
+                
                 elif msg_type == "progress":
                     st.session_state.progress = content
-
+                
                 elif msg_type == "success":
                     st.session_state.extraction_complete = True
                     st.session_state.download_data = content
                     st.session_state.status_messages.append("✅ Notes generation completed successfully!")
-
+                
                 elif msg_type == "error":
                     st.session_state.status_messages.append(f"❌ Error: {content}")
                     st.session_state.extraction_complete = True  # End the process
-
+                
                 elif msg_type == "done":
                     # Thread is done
                     st.session_state.thread = None
-
+            
             else:  # Legacy message format
                 st.session_state.status_messages.append(str(message))
-
+        
         if messages_processed:
             st.rerun()
         else:
             # If no messages were processed, sleep and rerun
             time.sleep(1)
             st.rerun()
-
+    
     # Show download section when extraction is complete
     if st.session_state.extraction_complete and st.session_state.download_data:
         st.markdown("---")
         st.markdown('<div class="download-notes-section">📥 Download Your Notes</div>', unsafe_allow_html=True)
-
+        
         col1, col2 = st.columns(2)
-
+        
         with col1:
             course_title = st.session_state.download_data["course_title"]
             transcript_count = len(st.session_state.download_data["transcripts"])
             summary_count = sum(1 for t in st.session_state.download_data["transcripts"] if 'summary' in t)
-
+            
             st.markdown(f"**Course**: {course_title}")
             st.markdown(f"**Processed Lectures**: {transcript_count}")
             st.markdown(f"**Generated Notes**: {summary_count}")
-
+        
         with col2:
             # Display download button with improved styling
             zip_file = st.session_state.download_data["zip_file"]
             st.markdown(get_download_link(zip_file, f"{course_title}_notes.zip", "📥 Download Notes"),
                         unsafe_allow_html=True)
-
+            
             # Option to restart the process with improved button
             if st.button("🔄 Process Another Course", type="primary", use_container_width=True,
                          key="process_another", help="Start over with a new course"):
@@ -607,7 +978,6 @@ def main():
                 for key in list(st.session_state.keys()):
                     del st.session_state[key]
                 st.rerun()
-
 
 if __name__ == "__main__":
     main()
