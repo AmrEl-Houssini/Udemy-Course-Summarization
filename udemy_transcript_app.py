@@ -37,7 +37,7 @@ def get_download_link(file_content, filename, text):
 def init_cloud_browser():
     """Initialize a browser compatible with Streamlit Cloud"""
     options = Options()
-
+    
     # Required for headless browser in cloud environment
     options.add_argument("--headless=new")  # Using newer headless mode
     options.add_argument("--no-sandbox")
@@ -45,39 +45,47 @@ def init_cloud_browser():
     options.add_argument("--disable-gpu")
     options.add_argument("--disable-extensions")
     options.add_argument("--window-size=1920,1080")  # Larger window size for better visibility
-
+    
     # Anti-detection settings
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
-
+    
     # Realistic user agent
-    options.add_argument(
-        "user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-
+    options.add_argument("user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+    
     try:
-        # Use ChromeDriverManager in a more cloud-friendly way
-        driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
-    except Exception as e:
-        st.error(f"Failed to initialize ChromeDriver: {str(e)}")
+        # First try: Use ChromeDriverManager with specific version
         try:
-            # Fallback approach for Streamlit Cloud
-            options.binary_location = "/usr/bin/google-chrome"  # Typical location in Linux cloud environments
-            driver = webdriver.Chrome(options=options)
+            driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+            return driver
         except Exception as e:
-            st.error(f"Could not initialize Chrome: {str(e)}")
-            raise Exception("Failed to initialize browser in cloud environment")
-
-    # Execute CDP commands to prevent detection
-    driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
-        "source": """
-        Object.defineProperty(navigator, 'webdriver', {
-            get: () => undefined
-        })
-        """
-    })
-
-    return driver
+            print(f"First attempt failed: {str(e)}")
+            
+        # Second try: Use direct Chrome binary path (common in cloud environments)
+        try:
+            options.binary_location = "/usr/bin/google-chrome"  # Common path in cloud environments
+            driver = webdriver.Chrome(options=options)
+            return driver
+        except Exception as e:
+            print(f"Second attempt failed: {str(e)}")
+            
+        # Third try: Use Playwright as fallback
+        try:
+            from playwright.sync_api import sync_playwright
+            playwright = sync_playwright().start()
+            browser = playwright.chromium.launch(headless=True)
+            context = browser.new_context()
+            page = context.new_page()
+            return page
+        except Exception as e:
+            print(f"Third attempt failed: {str(e)}")
+            
+        raise Exception("All browser initialization attempts failed")
+        
+    except Exception as e:
+        print(f"Browser initialization error: {str(e)}")
+        raise Exception(f"Failed to initialize browser: {str(e)}")
 
 
 def init_visible_browser():
@@ -474,18 +482,30 @@ def modified_extract_all_transcripts(extractor, course_url, max_videos, status_q
 def handle_ibm_login(driver, course_url, ibm_email, ibm_password, status_queue):
     """Handle the IBM w3id login process for Udemy for Business"""
     try:
+        # Check if we're using Playwright
+        is_playwright = hasattr(driver, 'goto')
+        
         # Navigate to course URL first
-        driver.get(course_url)
+        if is_playwright:
+            driver.goto(course_url)
+        else:
+            driver.get(course_url)
         status_queue.put(("status", "Navigated to course page. Looking for login elements..."))
         time.sleep(3)
         
         # Look for login button or element
         try:
-            login_btn = WebDriverWait(driver, 10).until(
-                EC.element_to_be_clickable(
-                    (By.XPATH, "//a[contains(@class, 'login') or contains(@data-purpose, 'header-login')]"))
-            )
-            login_btn.click()
+            if is_playwright:
+                # Playwright selectors
+                login_btn = driver.wait_for_selector("a[class*='login'], a[data-purpose*='header-login']", timeout=10000)
+                login_btn.click()
+            else:
+                # Selenium selectors
+                login_btn = WebDriverWait(driver, 10).until(
+                    EC.element_to_be_clickable(
+                        (By.XPATH, "//a[contains(@class, 'login') or contains(@data-purpose, 'header-login')]"))
+                )
+                login_btn.click()
             status_queue.put(("status", "Clicked on login button."))
             time.sleep(2)
         except Exception as e:
@@ -493,69 +513,59 @@ def handle_ibm_login(driver, course_url, ibm_email, ibm_password, status_queue):
         
         # Handle the IBM Security Verify screen - select "w3id Credentials" option
         try:
-            # Wait for the w3id Credentials button to be visible
-            WebDriverWait(driver, 15).until(
-                EC.presence_of_element_located((By.ID, "credsDiv"))
-            )
-            
-            status_queue.put(("status", "Found IBM Security Verify screen with w3id Credentials option"))
-            
-            # Try multiple approaches to click the w3id Credentials button
-            try:
-                # First approach: click the div directly
-                w3id_button = driver.find_element(By.ID, "credsDiv")
+            if is_playwright:
+                # Wait for the w3id Credentials button
+                w3id_button = driver.wait_for_selector("#credsDiv", timeout=15000)
                 w3id_button.click()
-                status_queue.put(("status", "Clicked w3id Credentials button directly"))
-            except Exception as e:
-                status_queue.put(("status", f"Could not click button directly: {str(e)}. Trying alternative approach..."))
-                
-                try:
-                    # Second approach: click the label
-                    label = driver.find_element(By.XPATH, "//label[@for='credsDiv']")
-                    label.click()
-                    status_queue.put(("status", "Clicked w3id Credentials label"))
-                except Exception as e2:
-                    status_queue.put(("status", f"Could not click label: {str(e2)}. Trying JavaScript click..."))
-                    
-                    try:
-                        # Third approach: use JavaScript to click
-                        element = driver.find_element(By.ID, "credsDiv")
-                        driver.execute_script("arguments[0].click();", element)
-                        status_queue.put(("status", "Used JavaScript to click w3id Credentials button"))
-                    except Exception as e3:
-                        status_queue.put(("status", f"All attempts to click w3id option failed: {str(e3)}"))
-                        return False
+            else:
+                # Wait for the w3id Credentials button
+                w3id_button = WebDriverWait(driver, 15).until(
+                    EC.presence_of_element_located((By.ID, "credsDiv"))
+                )
+                w3id_button.click()
             
-            # Wait for transition to the username/password screen
+            status_queue.put(("status", "Selected w3id Credentials option"))
             time.sleep(5)
             
         except Exception as e:
-            status_queue.put(("status", f"Error on IBM Security Verify screen: {str(e)}. Attempting to continue..."))
+            status_queue.put(("status", f"Error selecting w3id option: {str(e)}. Attempting to continue..."))
         
         # Now handle the username/password form
         try:
-            # Wait for the email field to appear
-            email_field = WebDriverWait(driver, 15).until(
-                EC.presence_of_element_located((By.ID, "user-name-input"))
-            )
-            email_field.clear()
-            email_field.send_keys(ibm_email)
-            status_queue.put(("status", "Entered IBM email"))
+            if is_playwright:
+                # Fill email field
+                email_field = driver.wait_for_selector("#user-name-input", timeout=15000)
+                email_field.fill(ibm_email)
+                
+                # Fill password field
+                password_field = driver.wait_for_selector("#password-input", timeout=10000)
+                password_field.fill(ibm_password)
+                
+                # Click sign in button
+                submit_button = driver.wait_for_selector("#login-button", timeout=10000)
+                submit_button.click()
+            else:
+                # Fill email field
+                email_field = WebDriverWait(driver, 15).until(
+                    EC.presence_of_element_located((By.ID, "user-name-input"))
+                )
+                email_field.clear()
+                email_field.send_keys(ibm_email)
+                
+                # Fill password field
+                password_field = WebDriverWait(driver, 10).until(
+                    EC.presence_of_element_located((By.ID, "password-input"))
+                )
+                password_field.clear()
+                password_field.send_keys(ibm_password)
+                
+                # Click sign in button
+                submit_button = WebDriverWait(driver, 10).until(
+                    EC.element_to_be_clickable((By.ID, "login-button"))
+                )
+                submit_button.click()
             
-            # Find and fill the password field
-            password_field = WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.ID, "password-input"))
-            )
-            password_field.clear()
-            password_field.send_keys(ibm_password)
-            status_queue.put(("status", "Entered IBM password"))
-            
-            # Click the sign in button
-            submit_button = WebDriverWait(driver, 10).until(
-                EC.element_to_be_clickable((By.ID, "login-button"))
-            )
-            submit_button.click()
-            status_queue.put(("status", "Clicked IBM sign in button. Waiting for login to complete..."))
+            status_queue.put(("status", "Submitted login credentials. Waiting for login to complete..."))
             time.sleep(10)  # Give enough time for login and potential redirects
             
         except Exception as e:
@@ -564,18 +574,26 @@ def handle_ibm_login(driver, course_url, ibm_email, ibm_password, status_queue):
         
         # Check if login was successful
         try:
-            # Wait for typical course elements after successful login
-            WebDriverWait(driver, 15).until(
-                EC.any_of(
-                    EC.presence_of_element_located((By.XPATH, "//div[contains(@class, 'course-content')]")),
-                    EC.presence_of_element_located((By.XPATH, "//a[contains(@class, 'user-profile')]")),
-                    EC.presence_of_element_located((By.XPATH, "//div[contains(@class, 'sidebar')]"))
+            if is_playwright:
+                # Wait for course elements
+                driver.wait_for_selector("div[class*='course-content'], a[class*='user-profile'], div[class*='sidebar']", timeout=15000)
+            else:
+                # Wait for course elements
+                WebDriverWait(driver, 15).until(
+                    EC.any_of(
+                        EC.presence_of_element_located((By.XPATH, "//div[contains(@class, 'course-content')]")),
+                        EC.presence_of_element_located((By.XPATH, "//a[contains(@class, 'user-profile')]")),
+                        EC.presence_of_element_located((By.XPATH, "//div[contains(@class, 'sidebar')]"))
+                    )
                 )
-            )
+            
             status_queue.put(("status", "IBM login successful! Detected course elements."))
             
             # Navigate back to course URL to ensure we're on the right page
-            driver.get(course_url)
+            if is_playwright:
+                driver.goto(course_url)
+            else:
+                driver.get(course_url)
             status_queue.put(("status", "Navigated back to course page after login."))
             time.sleep(5)
             
@@ -593,6 +611,18 @@ def extraction_thread(driver, course_url, max_videos, api_key, status_queue, ibm
     """Run extraction in a separate thread with IBM login handling"""
     try:
         status_queue.put(("status", "Starting IBM w3id login process..."))
+        
+        # Check if we're using Playwright
+        is_playwright = hasattr(driver, 'goto')  # Playwright page has goto method
+        
+        if is_playwright:
+            # Handle Playwright navigation
+            driver.goto(course_url)
+            status_queue.put(("status", "Navigated to course page using Playwright"))
+        else:
+            # Handle Selenium navigation
+            driver.get(course_url)
+            status_queue.put(("status", "Navigated to course page using Selenium"))
         
         # Handle IBM login
         login_success = handle_ibm_login(driver, course_url, ibm_email, ibm_password, status_queue)
@@ -645,9 +675,12 @@ def extraction_thread(driver, course_url, max_videos, api_key, status_queue, ibm
     finally:
         # Close the browser
         try:
-            if driver:
+            if is_playwright:
+                driver.close()
+                driver.context.browser.close()
+            else:
                 driver.quit()
-                status_queue.put(("status", "Browser closed."))
+            status_queue.put(("status", "Browser closed."))
         except Exception as e:
             status_queue.put(("status", f"Error closing browser: {str(e)}"))
         # Signal that the thread is done
